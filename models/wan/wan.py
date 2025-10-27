@@ -603,29 +603,24 @@ class ControlLatentsMLPLayer(nn.Module):
         from models.base import make_contiguous
         
         L = len(inputs)
-        if L == 9:
-            # 拆解：前 8 项 + control_latents
-            *first_8, control_latents = inputs
-            
-            if control_latents is not None:
-                # 通过 MLP 处理
-                added_kv_control = self.mlp(control_latents)  # (B, T*H*W, dim)
-                added_kv_control_lens = torch.full(
-                    (added_kv_control.size(0),), added_kv_control.size(1),
-                    device=added_kv_control.device, dtype=torch.long
-                )
-            else:
-                added_kv_control = None
-                added_kv_control_lens = None
-            
-            # 输出 11 项
-            return make_contiguous(*first_8, added_kv_control, added_kv_control_lens)
+
+        # 拆解：前 8 项 + control_latents
+        *first_8, control_latents = inputs
         
-        elif L in (6, 7, 8, 10, 11):
-            # 其他情况直接透传
-            return inputs
+        if control_latents is not None:
+            # 通过 MLP 处理
+            added_kv_control = self.mlp(control_latents)  # (B, T*H*W, dim)
+            added_kv_control_lens = torch.full(
+                (added_kv_control.size(0),), added_kv_control.size(1),
+                device=added_kv_control.device, dtype=torch.long
+            )
         else:
-            raise ValueError(f"ControlLatentsMLPLayer: unexpected inputs length={L}")
+            added_kv_control = None
+            added_kv_control_lens = None
+        
+        # 输出 11 项
+        return make_contiguous(*first_8, added_kv_control, added_kv_control_lens)
+
 
 # wan.py
 class IPAdapterMLPLayer(nn.Module):
@@ -643,22 +638,17 @@ class IPAdapterMLPLayer(nn.Module):
     @torch.autocast('cuda', dtype=AUTOCAST_DTYPE)
     def forward(self, inputs):
         L = len(inputs)
-        if L == 7:
-            # 拆出第7项的 id_embeds
-            x, y, t, text_embeddings_or_ids, seq_lens_or_text_mask, clip_fea, id_embeds = inputs
-            added_kv = self.mlp(id_embeds)  # (B, T, C)
-            added_kv_lens = torch.full(
-                (added_kv.size(0),), added_kv.size(1), device=added_kv.device, dtype=torch.long
-            )
-            from models.base import make_contiguous
-            return make_contiguous(
-                x, y, t, text_embeddings_or_ids, seq_lens_or_text_mask, clip_fea, added_kv, added_kv_lens
-            )
-        elif L in (6, 8, 9):
-            # 6: 老路径；8/9：已带 added_kv 的路径 -> 原样透传
-            return inputs
-        else:
-            raise ValueError(f"IPAdapterMLPLayer: unexpected inputs length={L}")
+        # 拆出第7项的 id_embeds
+        x, y, t, text_embeddings_or_ids, seq_lens_or_text_mask, clip_fea, condition_image_embeds, control_latent= inputs
+        added_kv = self.mlp(condition_image_embeds)  # (B, T, C)
+        print(f"shape of added_kv from IPA MLP: {added_kv.shape}")
+        added_kv_lens = torch.full(
+            (added_kv.size(0),), added_kv.size(1), device=added_kv.device, dtype=torch.long
+        )
+        from models.base import make_contiguous
+        return make_contiguous(
+            x, y, t, text_embeddings_or_ids, seq_lens_or_text_mask, clip_fea, added_kv, added_kv_lens, control_latent
+        )
 
 
 # ==== wan.py ====
