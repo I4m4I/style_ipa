@@ -381,68 +381,68 @@ class WanPipeline(BasePipeline):
 
     def prepare_inputs(self, inputs, timestep_quantile=None):
         #==================== 数据验证代码 ====================
-        print("\n" + "="*80)
-        print("📊 DATA VALIDATION - prepare_inputs")
-        print("="*80)
+        # print("\n" + "="*80)
+        # print("📊 DATA VALIDATION - prepare_inputs")
+        # print("="*80)
         
-        # 1. 检查 inputs 包含的键
-        print(f"\n🔑 Input keys: {list(inputs.keys())}")
+        # # 1. 检查 inputs 包含的键
+        # print(f"\n🔑 Input keys: {list(inputs.keys())}")
         
-        # 2. 检查你的新数据
-        expected_keys = ['latents', 'control_latents', 'condition_image_latents', 
-                        'mask', 'text_embeddings', 'seq_lens', 'caption']
+        # # 2. 检查你的新数据
+        # expected_keys = ['latents', 'control_latents', 'condition_image_embeds', 
+        #                 'mask', 'text_embeddings', 'seq_lens', 'caption']
         
-        for key in expected_keys:
-            if key in inputs:
-                value = inputs[key]
-                if isinstance(value, torch.Tensor):
-                    print(f"\n✅ {key}:")
-                    print(f"   Shape: {value.shape}")
-                    print(f"   Dtype: {value.dtype}")
-                    print(f"   Device: {value.device}")
-                    print(f"   Range: [{value.min():.4f}, {value.max():.4f}]")
-                    print(f"   Mean: {value.mean():.4f}, Std: {value.std():.4f}")
-                    # 检查是否有NaN或Inf
-                    if torch.isnan(value).any():
-                        print(f"   ⚠️  WARNING: Contains NaN!")
-                    if torch.isinf(value).any():
-                        print(f"   ⚠️  WARNING: Contains Inf!")
-                elif isinstance(value, list):
-                    print(f"\n✅ {key}: List with {len(value)} items")
-                    if len(value) > 0:
-                        print(f"   First item type: {type(value[0])}")
-                        if isinstance(value[0], str):
-                            print(f"   Example: '{value[0][:100]}...'")
-                else:
-                    print(f"\n✅ {key}: {type(value)} = {value}")
-            else:
-                print(f"\n❌ {key}: NOT FOUND in inputs")
+        # for key in expected_keys:
+        #     if key in inputs:
+        #         value = inputs[key]
+        #         if isinstance(value, torch.Tensor):
+        #             print(f"\n✅ {key}:")
+        #             print(f"   Shape: {value.shape}")
+        #             print(f"   Dtype: {value.dtype}")
+        #             print(f"   Device: {value.device}")
+        #             print(f"   Range: [{value.min():.4f}, {value.max():.4f}]")
+        #             print(f"   Mean: {value.mean():.4f}, Std: {value.std():.4f}")
+        #             # 检查是否有NaN或Inf
+        #             if torch.isnan(value).any():
+        #                 print(f"   ⚠️  WARNING: Contains NaN!")
+        #             if torch.isinf(value).any():
+        #                 print(f"   ⚠️  WARNING: Contains Inf!")
+        #         elif isinstance(value, list):
+        #             print(f"\n✅ {key}: List with {len(value)} items")
+        #             if len(value) > 0:
+        #                 print(f"   First item type: {type(value[0])}")
+        #                 if isinstance(value[0], str):
+        #                     print(f"   Example: '{value[0][:100]}...'")
+        #         else:
+        #             print(f"\n✅ {key}: {type(value)} = {value}")
+        #     else:
+        #         print(f"\n❌ {key}: NOT FOUND in inputs")
         
-        # 3. 特别检查你的新数据维度是否符合预期
-        if 'latents' in inputs and 'control_latents' in inputs:
-            latents = inputs['latents']
-            control_latents = inputs['control_latents']
-            condition_image_latents = inputs.get('condition_image_latents')
+        # # 3. 特别检查你的新数据维度是否符合预期
+        # if 'latents' in inputs and 'control_latents' in inputs:
+        #     latents = inputs['latents']
+        #     control_latents = inputs['control_latents']
+        #     condition_image_embeds = inputs.get('condition_image_embeds')
             
-            print(f"\n📐 Shape Check:")
-            print(f"   latents:               {latents.shape}")
-            print(f"   control_latents:       {control_latents.shape}")
-            if condition_image_latents is not None:
-                print(f"   condition_image_latents: {condition_image_latents.shape}")
+        #     print(f"\n📐 Shape Check:")
+        #     print(f"   latents:               {latents.shape}")
+        #     print(f"   control_latents:       {control_latents.shape}")
+        #     if condition_image_embeds is not None:
+        #         print(f"   condition_image_embeds: {condition_image_embeds.shape}")
                 
-            # 验证形状一致性
-            assert latents.shape == control_latents.shape, \
-                f"Shape mismatch: latents {latents.shape} != control_latents {control_latents.shape}"
+        #     # 验证形状一致性
+        #     assert latents.shape == control_latents.shape, \
+        #         f"Shape mismatch: latents {latents.shape} != control_latents {control_latents.shape}"
             
-            if condition_image_latents is not None:
-                bs, num_imgs, c, t, h, w = condition_image_latents.shape
-                print(f"   ✓ Condition images: {bs} batches × {num_imgs} images × ({c}, {t}, {h}, {w})")
-                assert num_imgs == 3, f"Expected 3 condition images, got {num_imgs}"
-                assert t == 1, f"Expected single-frame images, got {t} frames"
+        #     if condition_image_embeds is not None:
+        #         bs, num_imgs, c, t, h, w = condition_image_embeds.shape
+        #         print(f"   ✓ Condition images: {bs} batches × {num_imgs} images × ({c}, {t}, {h}, {w})")
+        #         assert num_imgs == 3, f"Expected 3 condition images, got {num_imgs}"
+        #         assert t == 1, f"Expected single-frame images, got {t} frames"
         
-        print("\n" + "="*80)
-        print("✅ Validation complete - proceeding with training")
-        print("="*80 + "\n")
+        # print("\n" + "="*80)
+        # print("✅ Validation complete - proceeding with training")
+        # print("="*80 + "\n")
         
         # ==================== 原始代码继续 ====================
         latents = inputs['latents'].float()
