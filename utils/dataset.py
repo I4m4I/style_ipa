@@ -922,7 +922,7 @@ def _cache_fn(datasets, queue, preprocess_media_file_fn, num_text_encoders, rege
         
         label_tensors = []
         control_tensors = []
-        condition_img_tensors = []  # 存储原始图片tensor
+        condition_raw_images = []  # ← 改：存储原始PIL图像，而不是预处理后的tensor
         image_specs = []
         captions = []
         
@@ -946,26 +946,23 @@ def _cache_fn(datasets, queue, preprocess_media_file_fn, num_text_encoders, rege
                 control_tensor, _ = control_items[0]
                 control_tensors.append(control_tensor)
             
-            # 3. 处理3张条件图片 - 只预处理，不编码
+            # 3. 读取3张条件图片为PIL Image（不做任何预处理）
             if has_condition_images:
                 cond_images = example['condition_images'][i]
                 assert len(cond_images) == 3
                 
-                cond_img_batch = []
+                cond_pil_images = []
                 for cond_img_path in cond_images:
-                    # 使用固定的图片尺寸，SigLIP期望384x384
-                    img_bucket = (384, 384, 1)
-                    cond_items = preprocess_media_file_fn((None, cond_img_path), None, img_bucket)
-                    assert len(cond_items) == 1
-                    cond_img_tensor, _ = cond_items[0]
-                    # cond_img_tensor shape: (C, 1, 384, 384)
-                    # 去掉时间维度，变成 (C, 384, 384)
-                    cond_img_tensor = cond_img_tensor.squeeze(1)
-                    cond_img_batch.append(cond_img_tensor)
+                    try:
+                        with Image.open(cond_img_path) as im:
+                            cond_pil_images.append(im.convert("RGB").copy())
+                    except Exception as e:
+                        logger.warning(f'Failed to open condition image {cond_img_path}: {e}')
+                        cond_pil_images.append(None)
                 
-                # Stack成 (3, C, 384, 384)
-                condition_img_tensors.append(torch.stack(cond_img_batch))
-            
+                condition_raw_images.append(cond_pil_images)  # List of 3 PIL images
+                print(f"len of condition_raw_images: {len(condition_raw_images)}")
+
             image_specs.append(image_spec)
             captions.append(caption)
         
@@ -973,7 +970,7 @@ def _cache_fn(datasets, queue, preprocess_media_file_fn, num_text_encoders, rege
             return {
                 'latents': [], 
                 'control_latents': [],
-                'condition_image_embeds': [],
+                'condition_image_latents': [],  # ← 统一命名
                 'mask': [], 
                 'image_spec': [], 
                 'caption': []
@@ -981,58 +978,49 @@ def _cache_fn(datasets, queue, preprocess_media_file_fn, num_text_encoders, rege
         
         # 发送给GPU处理
         results = defaultdict(list)
-        caching_batch_size = len(example['image_spec'])
+        batch_size = len(example['image_spec'])
         
-        for i in range(0, len(label_tensors), caching_batch_size):
-            # 处理label和control视频
-            label_batch = torch.stack(label_tensors[i:i+caching_batch_size])
-            control_batch = torch.stack(control_tensors[i:i+caching_batch_size]) if is_edit_dataset else None
+        for i in range(0, len(label_tensors), batch_size):
+            label_batch = torch.stack(label_tensors[i:i+batch_size])
+            control_batch = torch.stack(control_tensors[i:i+batch_size]) if is_edit_dataset else None
             
-            # 准备条件图片batch
+            # ← 关键：传递原始PIL图像列表，而不是预处理后的tensor
             condition_images_batch = None
             if has_condition_images:
-                # condition_img_tensors: list of (3, C, 384, 384)
-                # Stack成 (B, 3, C, 384, 384)
-                condition_images_batch = torch.stack(
-                    condition_img_tensors[i:i+caching_batch_size]
-                )
+                condition_images_batch = condition_raw_images[i:i+batch_size]
             
             parent_conn, child_conn = pipes.setdefault(rank, mp.Pipe(duplex=False))
-            
-            # 发送：id=0表示VAE+SigLIP处理
-            # 新增第4个参数：condition_images
-            print(f"before queue condition_images_batch shape{condition_images_batch.shape}")
             queue.put((0, label_batch, control_batch, condition_images_batch, child_conn))
             result = parent_conn.recv()
             
-            results['latents'].append(result['latents'])
-            if 'control_latents' in result:
-                results['control_latents'].append(result['control_latents'])
-            if 'condition_image_embeds' in result:
-                results['condition_image_embeds'].append(result['condition_image_embeds'])
-            if 'y' in result:
-                results['y'].append(result['y'])
-            if 'clip_context' in result:
-                results['clip_context'].append(result['clip_context'])
+            # 将结果分解为单个样本
+            for key, value in result.items():
+                if torch.is_tensor(value):
+                    results[key].extend([v for v in value])
+                elif isinstance(value, (list, tuple)):
+                    results[key].extend(value)
+                else:
+                    results[key].append(value)
         
-        # 合并结果
+        # 返回列表形式
         final_results = {
-            'latents': torch.cat(results['latents']),
+            'latents': results['latents'],
             'mask': [None] * len(image_specs),
             'image_spec': image_specs,
             'caption': captions,
         }
         
         if 'control_latents' in results:
-            final_results['control_latents'] = torch.cat(results['control_latents'])
+            final_results['control_latents'] = results['control_latents']
         if 'condition_image_embeds' in results:
-            print("you you you you")
-            final_results['condition_image_embeds'] = torch.cat(results['condition_image_embeds'])
-            print(f"you you you: {final_results['condition_image_embeds'].shape}")
+            print("you you you")
+            final_results['condition_image_embeds'] = results['condition_image_embeds']
+            print(f"you you you:{final_results['condition_image_embeds'][0].shape}")
+            print(f"you you you len:{len(final_results['condition_image_embeds'])}")
         if 'y' in results:
-            final_results['y'] = torch.cat(results['y'])
+            final_results['y'] = results['y']
         if 'clip_context' in results:
-            final_results['clip_context'] = torch.cat(results['clip_context'])
+            final_results['clip_context'] = results['clip_context']
         
         return final_results
 
