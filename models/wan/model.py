@@ -167,6 +167,10 @@ class WanCrossAttention(WanSelfAttention):
         added_kv: torch.Tensor = None,          # (B, T_add, C=dim)
         added_kv_lens: torch.Tensor = None,     # (B,) 可选；不传则视为定长
         added_kv_scale: float = 1.0,            # 可选缩放（门控），默认 1.0
+        # Control Latents 的 KV (新增)
+        added_kv_control: torch.Tensor = None,
+        added_kv_control_lens: torch.Tensor = None,
+        added_kv_control_scale: float = 1.0,
     ):
         r"""
         Args:
@@ -175,6 +179,8 @@ class WanCrossAttention(WanSelfAttention):
             context_lens(Tensor): Shape [B]
             added_kv(Tensor|None): Shape [B, T_add, C] —— IP-Adapter tokens (已对齐到 dim)
             added_kv_lens(Tensor|None): Shape [B]
+            added_kv_control(Tensor|None): Shape [B, T_control, C] - Control tokens (新增)
+            added_kv_control_lens(Tensor|None): Shape [B]
         """
         b, n, d = x.size(0), self.num_heads, self.head_dim
 
@@ -185,26 +191,42 @@ class WanCrossAttention(WanSelfAttention):
         k_ctx = self.norm_k(self.k(context)).view(b, -1, n, d)
         v_ctx = self.v(context).view(b, -1, n, d)
 
-        # ---- 额外 K,V（来自 IP-Adapter）----
+        # 收集所有的 K, V
+        k_list = [k_ctx]
+        v_list = [v_ctx]
+        lens_list = [context_lens] if context_lens is not None else []
+
+        # 额外 K,V（来自 IP-Adapter）
         if added_kv is not None:
-            # 复用与 context 相同的投影头，使其进入同一空间
             k_add = self.norm_k(self.k(added_kv)).view(b, -1, n, d)
             v_add = self.v(added_kv).view(b, -1, n, d)
             if added_kv_scale != 1.0:
                 v_add = v_add * added_kv_scale
+            k_list.insert(0, k_add)  # 插入到前面
+            v_list.insert(0, v_add)
+            if added_kv_lens is not None:
+                lens_list.append(added_kv_lens)
 
-            k = torch.cat([k_add, k_ctx], dim=1)
-            v = torch.cat([v_add, v_ctx], dim=1)
+        # 额外 K,V（来自 Control Latents）- 新增
+        if added_kv_control is not None:
+            k_ctrl = self.norm_k(self.k(added_kv_control)).view(b, -1, n, d)
+            v_ctrl = self.v(added_kv_control).view(b, -1, n, d)
+            if added_kv_control_scale != 1.0:
+                v_ctrl = v_ctrl * added_kv_control_scale
+            k_list.insert(0, k_ctrl)  # 插入到最前面
+            v_list.insert(0, v_ctrl)
+            if added_kv_control_lens is not None:
+                lens_list.append(added_kv_control_lens)
 
-            # lenses：两者相加（如未提供则走定长路径）
-            k_lens = None if (context_lens is None or added_kv_lens is None) \
-                      else (context_lens + added_kv_lens)
-        else:
-            k, v = k_ctx, v_ctx
-            k_lens = context_lens
+        # 拼接所有 K, V
+        k = torch.cat(k_list, dim=1)
+        v = torch.cat(v_list, dim=1)
+        
+        # 计算总长度
+        k_lens = None if len(lens_list) == 0 else sum(lens_list) if len(lens_list) > 1 else lens_list[0]
 
         # compute attention
-        x = flash_attention(q, k, v, k_lens=context_lens)
+        x = flash_attention(q, k, v, k_lens=k_lens)
 
         # output
         x = x.flatten(2)
@@ -318,6 +340,10 @@ class WanAttentionBlock(nn.Module):
         added_kv: torch.Tensor = None,
         added_kv_lens: torch.Tensor = None,
         added_kv_scale: float = 1.0,
+        # Control 参数 (新增)
+        added_kv_control: torch.Tensor = None,
+        added_kv_control_lens: torch.Tensor = None,
+        added_kv_control_scale: float = 1.0,
     ):
         r"""
         Args:
@@ -343,10 +369,13 @@ class WanAttentionBlock(nn.Module):
                 self.norm3(x),
                 context,
                 context_lens,
-                # >>> 新增的三个参数 <<< New
                 added_kv=added_kv,
                 added_kv_lens=added_kv_lens,
                 added_kv_scale=added_kv_scale,
+                # 新增参数
+                added_kv_control=added_kv_control,
+                added_kv_control_lens=added_kv_control_lens,
+                added_kv_control_scale=added_kv_control_scale,
             )
             y = self.ffn(self.norm2(x) * (1 + e[4].squeeze(2)) + e[3].squeeze(2))
             x = x + y * e[5].squeeze(2)

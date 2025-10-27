@@ -1,4 +1,5 @@
 import json
+from multiprocessing import context
 import re
 import os.path
 from pathlib import Path
@@ -24,6 +25,7 @@ from . import configs as wan_configs
 
 from models.base import MLP_Clip2Added_kv
 from transformers import AutoImageProcessor
+from models.base import MLP_Clip2Added_kv, MLP_ControlLatents2Added_kv
 
 KEEP_IN_HIGH_PRECISION = ['norm', 'bias', 'patch_embedding', 'text_embedding', 'time_embedding', 'time_projection', 'head', 'modulation']
 
@@ -237,6 +239,15 @@ class WanPipeline(BasePipeline):
         else:
             self.siglip_encoder = None
             self.siglip_processor = None
+        
+        # 在 siglip_encoder 初始化之后
+        if model_type == 'ti2v':
+            # 初始化 Control MLP
+            self.control_mlp = MLP_ControlLatents2Added_kv(
+                latent_channels=16,  # VAE latent channels
+                dim=self.json_config['dim'],  # 3072 for ti2v_5B
+            )
+            print(f"Initialized Control MLP for control_latents injection")
     # delay loading transformer to save RAM
     def load_diffusion_model(self):
         dtype = self.model_config['dtype']
@@ -287,6 +298,7 @@ class WanPipeline(BasePipeline):
         if self.ip_adapter:
             Path(save_dir).mkdir(parents=True, exist_ok=True)
             torch.save(self.MLP_Clip2Added_kv.state_dict(), save_dir / "mlp_clip2added_kv.pt")
+            torch.save(self.control_mlp.state_dict(), save_dir / "control_mlp.pt")
             return
         self.peft_config.save_pretrained(save_dir)
         # ComfyUI format.
@@ -305,6 +317,15 @@ class WanPipeline(BasePipeline):
         state = torch.load(path, map_location="cpu")
         load_info = self.MLP_Clip2Added_kv.load_state_dict(state, strict=True)   # 不想严格就 strict=False
         print(getattr(load_info, "missing_keys", []), getattr(load_info, "unexpected_keys", []))
+        control_mlp_path = Path(adapter_path) / "control_mlp.pt"
+        if not hasattr(self, 'control_mlp'):
+            self.control_mlp = MLP_ControlLatents2Added_kv(
+                latent_channels=16,
+                dim=self.json_config['dim']
+            )
+        state = torch.load(control_mlp_path, map_location="cpu")
+        self.control_mlp.load_state_dict(state, strict=True)
+        print(f"Loaded control MLP from {control_mlp_path}")
     
     def save_model(self, save_dir, state_dict):
         safetensors.torch.save_file(state_dict, save_dir / 'model.safetensors', metadata={'format': 'pt'})
@@ -391,78 +412,78 @@ class WanPipeline(BasePipeline):
 
     def prepare_inputs(self, inputs, timestep_quantile=None):
         #==================== 数据验证代码 ====================
-        print("\n" + "="*80)
-        print("📊 DATA VALIDATION - prepare_inputs")
-        print("="*80)
+        # print("\n" + "="*80)
+        # print("📊 DATA VALIDATION - prepare_inputs")
+        # print("="*80)
         
-        # 1. 检查 inputs 包含的键
-        print(f"\n🔑 Input keys: {list(inputs.keys())}")
+        # # 1. 检查 inputs 包含的键
+        # print(f"\n🔑 Input keys: {list(inputs.keys())}")
         
-        # 2. 检查你的新数据
-        expected_keys = ['latents', 'control_latents', 'condition_image_embeds', 
-                        'mask', 'text_embeddings', 'seq_lens', 'caption']
+        # # 2. 检查你的新数据
+        # expected_keys = ['latents', 'control_latents', 'condition_image_embeds', 
+        #                 'mask', 'text_embeddings', 'seq_lens', 'caption']
         
-        for key in expected_keys:
-            if key in inputs:
-                value = inputs[key]
-                if isinstance(value, torch.Tensor):
-                    print(f"\n✅ {key}:")
-                    print(f"   Shape: {value.shape}")
-                    print(f"   Dtype: {value.dtype}")
-                    print(f"   Device: {value.device}")
-                    print(f"   Range: [{value.min():.4f}, {value.max():.4f}]")
-                    print(f"   Mean: {value.mean():.4f}, Std: {value.std():.4f}")
-                    # 检查是否有NaN或Inf
-                    if torch.isnan(value).any():
-                        print(f"   ⚠️  WARNING: Contains NaN!")
-                    if torch.isinf(value).any():
-                        print(f"   ⚠️  WARNING: Contains Inf!")
-                elif isinstance(value, list):
-                    print(f"\n✅ {key}: List with {len(value)} items")
-                    if len(value) > 0:
-                        print(f"   First item type: {type(value[0])}")
-                        if isinstance(value[0], str):
-                            print(f"   Example: '{value[0][:100]}...'")
-                else:
-                    print(f"\n✅ {key}: {type(value)} = {value}")
-            else:
-                print(f"\n❌ {key}: NOT FOUND in inputs")
+        # for key in expected_keys:
+        #     if key in inputs:
+        #         value = inputs[key]
+        #         if isinstance(value, torch.Tensor):
+        #             print(f"\n✅ {key}:")
+        #             print(f"   Shape: {value.shape}")
+        #             print(f"   Dtype: {value.dtype}")
+        #             print(f"   Device: {value.device}")
+        #             print(f"   Range: [{value.min():.4f}, {value.max():.4f}]")
+        #             print(f"   Mean: {value.mean():.4f}, Std: {value.std():.4f}")
+        #             # 检查是否有NaN或Inf
+        #             if torch.isnan(value).any():
+        #                 print(f"   ⚠️  WARNING: Contains NaN!")
+        #             if torch.isinf(value).any():
+        #                 print(f"   ⚠️  WARNING: Contains Inf!")
+        #         elif isinstance(value, list):
+        #             print(f"\n✅ {key}: List with {len(value)} items")
+        #             if len(value) > 0:
+        #                 print(f"   First item type: {type(value[0])}")
+        #                 if isinstance(value[0], str):
+        #                     print(f"   Example: '{value[0][:100]}...'")
+        #         else:
+        #             print(f"\n✅ {key}: {type(value)} = {value}")
+        #     else:
+        #         print(f"\n❌ {key}: NOT FOUND in inputs")
         
-        # 3. 特别检查你的新数据维度是否符合预期
-        if 'latents' in inputs and 'control_latents' in inputs:
-            latents = inputs['latents']
-            control_latents = inputs['control_latents']
-            condition_image_embeds = inputs.get('condition_image_embeds')
+        # # 3. 特别检查你的新数据维度是否符合预期
+        # if 'latents' in inputs and 'control_latents' in inputs:
+        #     latents = inputs['latents']
+        #     control_latents = inputs['control_latents']
+        #     condition_image_embeds = inputs.get('condition_image_embeds')
             
-            print(f"\n📐 Shape Check:")
-            print(f"   latents:               {latents.shape}")
-            print(f"   control_latents:       {control_latents.shape}")
-            if condition_image_embeds is not None:
-                print(f"   condition_image_embeds: {condition_image_embeds.shape}")
+        #     print(f"\n📐 Shape Check:")
+        #     print(f"   latents:               {latents.shape}")
+        #     print(f"   control_latents:       {control_latents.shape}")
+        #     if condition_image_embeds is not None:
+        #         print(f"   condition_image_embeds: {condition_image_embeds.shape}")
                 
-            # 验证形状一致性
-            assert latents.shape == control_latents.shape, \
-                f"Shape mismatch: latents {latents.shape} != control_latents {control_latents.shape}"
+        #     # 验证形状一致性
+        #     assert latents.shape == control_latents.shape, \
+        #         f"Shape mismatch: latents {latents.shape} != control_latents {control_latents.shape}"
             
-            if condition_image_embeds is not None:
-                bs, num_imgs, c, t, h, w = condition_image_embeds.shape
-                print(f"   ✓ Condition images: {bs} batches × {num_imgs} images × ({c}, {t}, {h}, {w})")
-                assert num_imgs == 3, f"Expected 3 condition images, got {num_imgs}"
-                assert t == 1, f"Expected single-frame images, got {t} frames"
+        #     if condition_image_embeds is not None:
+        #         bs, num_imgs, c, t, h, w = condition_image_embeds.shape
+        #         print(f"   ✓ Condition images: {bs} batches × {num_imgs} images × ({c}, {t}, {h}, {w})")
+        #         assert num_imgs == 3, f"Expected 3 condition images, got {num_imgs}"
+        #         assert t == 1, f"Expected single-frame images, got {t} frames"
         
-        print("\n" + "="*80)
-        print("✅ Validation complete - proceeding with training")
-        print("="*80 + "\n")
+        # print("\n" + "="*80)
+        # print("✅ Validation complete - proceeding with training")
+        # print("="*80 + "\n")
         
         # ==================== 原始代码继续 ====================
         latents = inputs['latents'].float()
-        mask = inputs['mask']
+        mask = None
         # ... 后续代码保持不变 ...
         latents = inputs['latents'].float()
         mask = None
-        y = inputs['y'] if self.model_type in ('i2v', 'flf2v', 'i2v_v2') else None
+        y = None
         # No CLIP for i2v_v2 (Wan2.2)
-        clip_context = inputs['clip_context'] if self.model_type in ('i2v', 'flf2v') else None
+        clip_context = None
 
         if self.cache_text_embeddings:
             text_embeddings_or_ids = inputs['text_embeddings']
@@ -497,16 +518,18 @@ class WanPipeline(BasePipeline):
         # timestep input to model needs to be in range [0, 1000]
         t = t * 1000
 
-        if self.ip_adapter:
-            return (
-                (x_t, y, t, text_embeddings_or_ids, seq_lens_or_text_mask, clip_context, inputs['id_embeds']),
-                (target, mask),
-            )
-        else:
-            return (
-                (x_t, y, t, text_embeddings_or_ids, seq_lens_or_text_mask, clip_context),
-                (target, mask),
-            )
+        # 随机从 3 张图中选 2 张
+        condition_image_embeds = inputs['condition_image_embeds']  # (B, 3, 1152)
+        if condition_image_embeds is not None and condition_image_embeds.shape[1] == 3:
+            # 随机选择 2 个索引
+            indices = torch.randperm(3)[:2]  # 从 [0,1,2] 中随机选 2 个
+            condition_image_embeds = condition_image_embeds[:, indices, :]  # (B, 2, 1152)
+        
+        return (
+            (x_t, y, t, text_embeddings_or_ids, seq_lens_or_text_mask, clip_context, 
+            condition_image_embeds, inputs.get('control_latents')),
+            (target, mask),
+        )
 
     # def to_layers(self):
     #     transformer = self.transformer
@@ -523,9 +546,13 @@ class WanPipeline(BasePipeline):
 
         layers = []
 
-        # === 只有在 ip-adapter 模式下（存在 MLP_Clip2Added_kv）才插入这个前置层 ===
+        # IP-Adapter MLP layer
         if hasattr(self, 'MLP_Clip2Added_kv') and isinstance(self.MLP_Clip2Added_kv, nn.Module):
             layers.append(IPAdapterMLPLayer(self.MLP_Clip2Added_kv))
+        
+        # Control MLP layer (新增)
+        if hasattr(self, 'control_mlp') and isinstance(self.control_mlp, nn.Module):
+            layers.append(ControlLatentsMLPLayer(self.control_mlp))
 
         layers.append(InitialLayer(transformer, text_encoder))
         for i, block in enumerate(transformer.blocks):
@@ -560,6 +587,45 @@ class WanPipeline(BasePipeline):
             self.offloader.disable_block_swap()
         self.offloader.set_forward_only(True)
         self.offloader.prepare_block_devices_before_forward()
+
+class ControlLatentsMLPLayer(nn.Module):
+    """
+    处理 control_latents，将其转换为 added_kv_control
+    输入 9 项: (..., added_kv, added_kv_lens, control_latents)
+    输出 11 项: (..., added_kv, added_kv_lens, added_kv_control, added_kv_control_lens)
+    """
+    def __init__(self, control_mlp: nn.Module):
+        super().__init__()
+        self.mlp = control_mlp
+
+    @torch.autocast('cuda', dtype=AUTOCAST_DTYPE)
+    def forward(self, inputs):
+        from models.base import make_contiguous
+        
+        L = len(inputs)
+        if L == 9:
+            # 拆解：前 8 项 + control_latents
+            *first_8, control_latents = inputs
+            
+            if control_latents is not None:
+                # 通过 MLP 处理
+                added_kv_control = self.mlp(control_latents)  # (B, T*H*W, dim)
+                added_kv_control_lens = torch.full(
+                    (added_kv_control.size(0),), added_kv_control.size(1),
+                    device=added_kv_control.device, dtype=torch.long
+                )
+            else:
+                added_kv_control = None
+                added_kv_control_lens = None
+            
+            # 输出 11 项
+            return make_contiguous(*first_8, added_kv_control, added_kv_control_lens)
+        
+        elif L in (6, 7, 8, 10, 11):
+            # 其他情况直接透传
+            return inputs
+        else:
+            raise ValueError(f"ControlLatentsMLPLayer: unexpected inputs length={L}")
 
 # wan.py
 class IPAdapterMLPLayer(nn.Module):
@@ -619,14 +685,7 @@ class InitialLayer(nn.Module):
         # --- 向后兼容的输入解析 ---
         # 旧版: (x, y, t, text_embeddings_or_ids, seq_lens_or_text_mask, clip_fea)
         # 新版: ( ... , clip_fea, added_kv, added_kv_lens )
-        if len(inputs) == 6:
-            x, y, t, text_embeddings_or_ids, seq_lens_or_text_mask, clip_fea = inputs
-            added_kv = None
-            added_kv_lens = None
-        elif len(inputs) == 8:
-            x, y, t, text_embeddings_or_ids, seq_lens_or_text_mask, clip_fea, added_kv, added_kv_lens = inputs
-        else:
-            raise ValueError(f"InitialLayer: unexpected inputs length={len(inputs)}")
+        x, y, t, text_embeddings_or_ids, seq_lens_or_text_mask, clip_fea, added_kv, added_kv_lens, added_kv_control, added_kv_control_lens = inputs
 
         for item in (x, y, t):
             if torch.is_floating_point(item):
@@ -651,15 +710,6 @@ class InitialLayer(nn.Module):
         device = self.patch_embedding.weight.device
         if self.freqs.device != device:
             self.freqs = self.freqs.to(device)
-
-        # --- I2V / FLF2V / i2v_v2 预处理（与原版一致） ---
-        if self.i2v or self.flf2v or self.i2v_v2:
-            mask = torch.zeros((bs, 4, f, h, w), device=x.device, dtype=x.dtype)
-            mask[:, :, 0, ...] = 1
-            if self.flf2v:
-                mask[:, :, -1, ...] = 1
-            y = torch.cat([mask, y], dim=1)
-            x = [torch.cat([u, v], dim=0) for u, v in zip(x, y)]
 
         # --- patchify 与 pad（与原版一致） ---
         x = [self.patch_embedding(u.unsqueeze(0)) for u in x]
@@ -700,12 +750,12 @@ class InitialLayer(nn.Module):
         seq_lens = seq_lens.to(x.device)
         grid_sizes = grid_sizes.to(x.device)
 
-        if (added_kv is None) and (added_kv_lens is None):
-            return make_contiguous(x, e, e0, seq_lens, grid_sizes, self.freqs, context)
-        else:
-            return make_contiguous(x, e, e0, seq_lens, grid_sizes, self.freqs, context,
-                                    added_kv, added_kv_lens)
-
+        # 有 control 参数
+        added_kv_control = inputs[8] if len(inputs) > 8 else None
+        added_kv_control_lens = inputs[9] if len(inputs) > 9 else None
+        return make_contiguous(x, e, e0, seq_lens, grid_sizes, self.freqs, context,
+                            added_kv, added_kv_lens, added_kv_control, added_kv_control_lens)
+    
 class TransformerLayer(nn.Module):
     def __init__(self, block, block_idx, offloader):
         super().__init__()
@@ -715,28 +765,18 @@ class TransformerLayer(nn.Module):
 
     @torch.autocast('cuda', dtype=AUTOCAST_DTYPE)
     def forward(self, inputs):
-        # 兼容 7 or 9 项
-        if len(inputs) == 7:
-            x, e, e0, seq_lens, grid_sizes, freqs, context = inputs
-            added_kv = None
-            added_kv_lens = None
-        elif len(inputs) == 9:
-            x, e, e0, seq_lens, grid_sizes, freqs, context, added_kv, added_kv_lens = inputs
-        else:
-            raise ValueError(f"TransformerLayer: unexpected inputs length={len(inputs)}")
+        x, e, e0, seq_lens, grid_sizes, freqs, context, added_kv, added_kv_lens, added_kv_control, added_kv_control_lens = inputs
 
         self.offloader.wait_for_block(self.block_idx)
         x = self.block(
-            x, e0, seq_lens, grid_sizes, freqs, context, None,   # context_lens 仍传 None（与原来一致）
-            added_kv=added_kv, added_kv_lens=added_kv_lens       # <<< 新增
+            x, e0, seq_lens, grid_sizes, freqs, context, None,
+            added_kv=added_kv, added_kv_lens=added_kv_lens,
+            added_kv_control=added_kv_control, added_kv_control_lens=added_kv_control_lens  # 新增
         )
         self.offloader.submit_move_blocks_forward(self.block_idx)
 
-        if (added_kv is None) and (added_kv_lens is None):
-            return make_contiguous(x, e, e0, seq_lens, grid_sizes, freqs, context)
-        else:
-            return make_contiguous(x, e, e0, seq_lens, grid_sizes, freqs, context,
-                                    added_kv, added_kv_lens)
+        return make_contiguous(x, e, e0, seq_lens, grid_sizes, freqs, context,
+                              added_kv, added_kv_lens, added_kv_control, added_kv_control_lens)
 
 class FinalLayer(nn.Module):
     def __init__(self, model):
@@ -749,13 +789,7 @@ class FinalLayer(nn.Module):
 
     @torch.autocast('cuda', dtype=AUTOCAST_DTYPE)
     def forward(self, inputs):
-        # 兼容 7 or 9 项
-        if len(inputs) == 7:
-            x, e, e0, seq_lens, grid_sizes, freqs, context = inputs
-        elif len(inputs) == 9:
-            x, e, e0, seq_lens, grid_sizes, freqs, context, _added_kv, _added_kv_lens = inputs
-        else:
-            raise ValueError(f"FinalLayer: unexpected inputs length={len(inputs)}")
+        x, e, e0, seq_lens, grid_sizes, freqs, context, _added_kv, _added_kv_lens, _added_kv_ctrl, _added_kv_ctrl_lens = inputs
 
         x = self.head(x, e)
         x = self.unpatchify(x, grid_sizes)

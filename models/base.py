@@ -172,6 +172,72 @@ import math
 #         x = x.view(-1, self.num_tokens, self.dim)  # (B, T, C)
 #         return self.norm(x)
 
+
+class MLP_ControlLatents2Added_kv(nn.Module):
+    """
+    将 control_latents (B, C, T, H, W) 投影成 tokens。
+    通过 patch 参数在空间维度上做 patching，减少 token 数量。
+    输出: (B, num_tokens, dim)，其中 num_tokens = T * (H/patch) * (W/patch)
+    """
+    def __init__(self, latent_channels: int = 16, dim: int = 3072, patch: int = 1):
+        super().__init__()
+        self.latent_channels = latent_channels
+        self.dim = dim
+        self.patch = patch
+        
+        # 计算 patch 后的输入维度：patch*patch*C
+        patch_input_dim = patch * patch * latent_channels
+        
+        # 线性投影 + 激活 + 投影
+        self.proj = nn.Sequential(
+            nn.Linear(patch_input_dim, patch_input_dim * 2),
+            nn.GELU(),
+            nn.Linear(patch_input_dim * 2, dim),
+        )
+        self.norm = nn.LayerNorm(dim)
+    
+    def forward(self, control_latents: torch.Tensor):
+        """
+        Args:
+            control_latents: (B, C, T, H, W) - VAE 编码后的 latents
+        Returns:
+            tokens: (B, T*(H/patch)*(W/patch), dim) - patching 后的 tokens
+        """
+        B, C, T, H, W = control_latents.shape
+        
+        # 检查 H, W 能否被 patch 整除
+        assert H % self.patch == 0, f"Height {H} must be divisible by patch size {self.patch}"
+        assert W % self.patch == 0, f"Width {W} must be divisible by patch size {self.patch}"
+        
+        if self.patch == 1:
+            # 无 patching，直接 reshape
+            # (B, C, T, H, W) -> (B, T, H, W, C) -> (B, T*H*W, C)
+            x = control_latents.permute(0, 2, 3, 4, 1).reshape(B, T * H * W, C)
+        else:
+            # 有 patching
+            H_out = H // self.patch
+            W_out = W // self.patch
+            
+            # (B, C, T, H, W) -> (B, T, C, H, W)
+            x = control_latents.permute(0, 2, 1, 3, 4)
+            
+            # Reshape 成 patches: (B, T, C, H_out, patch, W_out, patch)
+            x = x.reshape(B, T, C, H_out, self.patch, W_out, self.patch)
+            
+            # 重排维度，将 patch 聚合到 channel 维度
+            # (B, T, H_out, W_out, patch, patch, C)
+            x = x.permute(0, 1, 3, 5, 4, 6, 2)
+            
+            # (B, T*H_out*W_out, patch*patch*C)
+            x = x.reshape(B, T * H_out * W_out, self.patch * self.patch * C)
+        
+        # 投影到目标维度
+        x = self.proj(x)  # (B, num_tokens, dim)
+        x = self.norm(x)
+        
+        return x
+
+
 class MLP_Clip2Added_kv(nn.Module):
     """
     将图像向量(例如 1152 维 SigLIP)投影成 num_tokens 个、每个维度为 cross_attention_dim 的 tokens。
@@ -331,6 +397,10 @@ class BasePipeline:
             self.peft_config = None
             self.lora_model = None
             self.MLP_Clip2Added_kv=MLP_Clip2Added_kv(dim=self.transformer.dim,id_embeddings_dim=1152,num_tokens=adapter_config['num_tokens'],siglip_pooling=adapter_config['siglip_pooling']).to(dtype=torch.bfloat16)
+
+            # 新增：初始化 Control MLP
+            if hasattr(self, 'control_mlp'):
+                self.control_mlp = self.control_mlp.to(dtype=getattr(torch, adapter_config['dtype'])).cuda()
 
             for name, p in self.transformer.named_parameters():
                 p.original_name = name
